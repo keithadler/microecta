@@ -1,0 +1,294 @@
+{- | Generators over constrained tree automata.
+
+A generator is a language of values whose support is an interned automaton
+with edges of type @symbol@ and constraints of type @constraint@. The theory
+of the automaton is the constraint type: @()@ for an ordinary tree automaton,
+'Data.CFTA.Equality.Constraint.EqConstraints' for equalities between child
+paths, and 'Data.CFTA.Refinement.Constraint.LiquidConstraint' for refinements
+decided by a solver. Every value stands for a term the automaton accepts, so
+the language is counted, replayed by rank, sampled, and shrunk exactly.
+
+An ordinary generator, one over a plain tree automaton, is 'FTAGen';
+"Data.CFTA.Gen.Equality" and "Data.CFTA.Gen.Refinement" fix the other two
+theories the same way.
+
+A finite generator has a 'cardinality' and one rank per distinct member. It
+comes from a source ('elements', 'leaf', 'fromIndexed'), from applicative
+composition closed by 'node', from a choice ('frequency', 'oneof'), from a
+join ('match', 'relate', 'apply'), or from an acyclic automaton
+('fromAutomaton'). A recursive generator ('recur', or 'fromAutomaton' on a
+cyclic automaton) is counted by size; 'upToSize' bounds it to a finite one.
+An opaque generator ('fromGen') can only be sampled. A construction failure
+stays inside the generator, and every inspector reports it.
+
+"Data.CFTA.Gen.QuickCheck" adds sampling and properties, and
+"Data.CFTA.Gen.Do" adds qualified applicative do-notation.
+-}
+module Data.CFTA.Gen (
+    -- * Generators
+    Gen,
+    FTAGen,
+    Grouped,
+    Label (..),
+    surface,
+    GenError (..),
+    explain,
+    orFail,
+
+    -- * Sources
+    Indexed (..),
+    fromIndexed,
+    elements,
+    namedElements,
+    leaf,
+    fromGen,
+
+    -- * Imported automata and datatypes
+    fromAutomaton,
+    fromAutomatonUpToDepth,
+    fromDatatype,
+    fromDatatypeUpToDepth,
+
+    -- * Composing
+    NodeLayer,
+    node,
+    frequency,
+    oneof,
+    uniformly,
+    On (..),
+    match,
+    relate,
+    relateM,
+
+    -- * The grouped layer
+    Sig (..),
+    sigResult,
+    Args (..),
+    keyed,
+    groupOn,
+    regroupOn,
+    mapWithKey,
+    nameGroups,
+    atKey,
+    nodeWithKey,
+    apply,
+    frequencies,
+    oneofGrouped,
+    uniformlyGrouped,
+    ungroup,
+    relateGroupsM,
+    relateN,
+    filterGroupsM,
+
+    -- * Recursion
+    atomic,
+    recur,
+    recurGrouped,
+    upToSize,
+    isRecursive,
+    isOpaque,
+
+    -- * Inspection
+    Inspection (..),
+    InspectionSymbol (..),
+    inspect,
+    drawInspection,
+    support,
+    cardinality,
+    values,
+    sizes,
+    countsAtSize,
+    massesAtSize,
+    countAtSize,
+    minimumSize,
+    countOn,
+    pmf,
+    pmfAtSize,
+    smallest,
+    unrank,
+    termAt,
+    sizeOfRank,
+    smallerMembers,
+    shrinkRank,
+
+    -- * Lowering
+    lower,
+    lowerWithRank,
+    lowerUniform,
+    lowerUniformWithRank,
+    lowerVia,
+    lowerWithRankVia,
+) where
+
+import Data.Hashable (Hashable)
+import qualified Data.Map.Strict as Map
+import Data.Maybe (listToMaybe)
+import Data.String (fromString)
+import Data.Text (Text)
+import qualified Data.Text as Text
+import qualified Data.Tree as Tree
+import Data.Typeable (Typeable)
+
+import qualified Data.CFTA as FTA
+import Data.CFTA.Constraint (Constraint)
+import Data.CFTA.Gen.Error
+import Data.CFTA.Gen.Internal.Flat hiding (fromAutomaton, fromAutomatonUpToDepth)
+import qualified Data.CFTA.Gen.Internal.Flat as Flat
+import Data.CFTA.Gen.Internal.Grouped
+import Data.CFTA.Gen.Internal.Inspection (Inspection (..), InspectionSymbol (..), drawInspection)
+import Data.CFTA.Gen.Internal.Query
+import Data.CFTA.Gen.Internal.Recur
+import Data.CFTA.Gen.Internal.Types
+import Data.CFTA.Gen.Label (Label (..), surface)
+import Data.CFTA.Gen.Sig (On (..), Sig (..), sigResult)
+import Data.CFTA.Generic (TypedFTA, constructorLabel, constructorName, datatypeDecode, datatypeFTA, decodeLabelledTerm)
+import Data.CFTA.Interned (Node)
+import qualified Data.CFTA.Interned as Common
+import Data.CFTA.Ranked.Internal (Indexed (..))
+import Data.CFTA.Refinement (AutomatonError (InconsistentArity))
+import Data.CFTA.Symbol (Symbol (Symbol))
+
+-- | A generator over ordinary tree automata: the theory without constraints.
+type FTAGen symbol = Gen symbol ()
+
+-- | Build one nullary constructor.
+leaf :: (Constraint constraint, Hashable symbol, Typeable symbol) => a -> symbol -> Gen symbol constraint a
+leaf value symbol = node symbol $ pure value
+
+{- | Read an automaton as a generator of the terms it accepts.
+
+The automaton is the support, unchanged. An acyclic automaton gives a finite
+generator with one rank per distinct term; where alternatives overlap or an
+equality reaches below direct children, the count is symbolic. Ranks order
+constructors by arity, then by the symbol's 'Ord', so they do not depend on
+the order in which the automaton was built. Nullary constructors come first,
+so shrinking moves toward leaves. A cyclic automaton gives a recursive
+generator counted by size, the number of term nodes, so 'upToSize' draws
+uniformly from the terms of at most a given size. Its count sums over
+accepting runs, so an ambiguous automaton is rejected with
+'AmbiguousAutomaton' and one with equality constraints with
+'CannotCountConstrainedEdges'. Because the values are the accepted terms, a
+bounded generator keeps full inspection.
+-}
+fromAutomaton ::
+    (Constraint constraint, Ord symbol, Hashable symbol, Typeable symbol) =>
+    Node symbol constraint -> Gen symbol constraint (Tree.Tree symbol)
+fromAutomaton = Flat.fromAutomaton id
+
+{- | Read the terms an automaton accepts up to a constructor-depth bound.
+
+A leaf has depth zero. The result is the finite generator 'fromAutomaton'
+gives for an acyclic automaton: each distinct term has one rank, unranking
+constructs only the selected term, and shrinks remain in the language.
+-}
+fromAutomatonUpToDepth ::
+    (Constraint constraint, Ord symbol, Hashable symbol, Typeable symbol) =>
+    Int -> Node symbol constraint -> Gen symbol constraint (Tree.Tree symbol)
+fromAutomatonUpToDepth = Flat.fromAutomatonUpToDepth id
+
+{- | Read a datatype grammar as a generator of its values.
+
+The generator is recursive when the datatype is, and finite otherwise. The
+value and its constructor term share one rank, and the codec runs only when a
+selected value is demanded. Ranks order the constructors of a type by arity,
+then in declaration order, and atomic literals in domain order. The generator decodes
+one term per constructor when it is built. If the codec rejects one, as it
+does for an atomic literal whose 'Show' text 'Read' does not accept, the
+generator fails with 'UndecodableConstructor'.
+-}
+fromDatatype :: (Constraint constraint) => TypedFTA constraint a -> Gen Symbol constraint a
+fromDatatype datatype = importDatatype datatype Flat.fromAutomaton
+
+{- | Generate datatype values up to a constructor depth. A leaf has depth zero.
+
+An annotated constructor generates only the values whose equal fields agree.
+-}
+fromDatatypeUpToDepth :: (Constraint constraint) => Int -> TypedFTA constraint a -> Gen Symbol constraint a
+fromDatatypeUpToDepth depth datatype =
+    importDatatype datatype $ \order -> Flat.fromAutomatonUpToDepth order depth
+
+{- | Import the grammar of a datatype and decode its terms as values.
+
+The key orders constructors by their position in the row of their type,
+which is declaration order for constructors and domain order for atomic
+literals. The symbol text breaks ties between rows. The import orders by
+arity before it uses the key.
+-}
+importDatatype ::
+    (Constraint constraint) =>
+    TypedFTA constraint a ->
+    ((Symbol -> (Int, Text)) -> Node Symbol constraint -> Gen Symbol constraint (Tree.Tree Symbol)) ->
+    Gen Symbol constraint a
+importDatatype datatype readAutomaton =
+    case FTA.mapSymbols (fromString . constructorLabel) (datatypeFTA datatype) of
+        Left (FTA.InconsistentArity symbol expected actual) ->
+            Transparent $ Left $ InvalidSupport $ InconsistentArity symbol expected actual
+        Left err ->
+            error $ "microcfta-generator bug in Data.CFTA.Gen.importDatatype: " <> show err
+        Right graph
+            | Just constructor <-
+                undecodableConstructor (null . datatypeDecode datatype) (datatypeFTA datatype) ->
+                Transparent $ Left $ UndecodableConstructor $ constructorName constructor
+            | otherwise -> decode <$> readAutomaton declarationOrder (Common.fromFTA graph)
+  where
+    positions =
+        Map.fromList
+            [ (Text.pack $ constructorLabel $ FTA.transitionSymbol transition, position)
+            | row <- Map.elems $ FTA.transitionTable $ datatypeFTA datatype
+            , (position, transition) <- zip [0 ..] row
+            ]
+    declarationOrder (Symbol name) = (Map.findWithDefault 0 name positions, name)
+    decode term = case decodeLabelledTerm datatype (fmap (\(Symbol label) -> Text.unpack label) term) of
+        Just value -> value
+        Nothing ->
+            error
+                "microcfta-generator bug in Data.CFTA.Gen.importDatatype: \
+                \the derived codec rejected a term of its own grammar"
+
+{- | Find a constructor that is in a term the codec rejects.
+
+Each transition of a reachable state gets one term of the initial state that
+contains it. The other positions of that term hold one fixed term of their
+state. So the check decodes one term per transition and does not enumerate
+the language. An atomic literal whose 'Show' text 'Read' does not accept makes
+its term fail.
+-}
+undecodableConstructor :: (Ord state) => (Tree.Tree symbol -> Bool) -> FTA.FTA state symbol constraint -> Maybe symbol
+undecodableConstructor rejects automaton =
+    listToMaybe
+        [ symbol
+        | (state, context) <- Map.toList contexts
+        , FTA.Transition symbol children _ <- FTA.transitionsFrom automaton state
+        , Just arguments <- [traverse (`Map.lookup` witnesses) children]
+        , rejects $ context $ Tree.Node symbol arguments
+        ]
+  where
+    -- One term for each productive state, as a least fixed point.
+    witnesses = converge Map.empty
+    converge known =
+        let next = Map.foldrWithKey addWitness known $ FTA.transitionTable automaton
+         in if Map.size next == Map.size known then known else converge next
+    addWitness state transitions known
+        | Map.member state known = known
+        | otherwise =
+            case [ Tree.Node symbol arguments
+                 | FTA.Transition symbol children _ <- transitions
+                 , Just arguments <- [traverse (`Map.lookup` known) children]
+                 ] of
+                term : _ -> Map.insert state term known
+                [] -> known
+    -- One context for each state that a term of the initial state reaches.
+    contexts = reach (Map.singleton (FTA.initialState automaton) id) [FTA.initialState automaton]
+    reach found [] = found
+    reach found (state : pending) =
+        let added =
+                Map.fromList
+                    [ ( child
+                      , \hole -> (found Map.! state) $ Tree.Node symbol $ take position arguments <> [hole] <> drop (position + 1) arguments
+                      )
+                    | FTA.Transition symbol children _ <- FTA.transitionsFrom automaton state
+                    , Just arguments <- [traverse (`Map.lookup` witnesses) children]
+                    , (position, child) <- zip [0 ..] children
+                    ]
+                    `Map.difference` found
+         in reach (Map.union found added) (pending <> Map.keys added)
