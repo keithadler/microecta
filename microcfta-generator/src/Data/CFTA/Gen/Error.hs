@@ -107,6 +107,10 @@ data GenError
       leaf in a form that compile cannot count.
       -}
       IntegerLeafRead !(Maybe Guard)
+    | -- | The result of the constructor names a child whose refinement does not fix one integer.
+      InexactResult !Symbol
+    | -- | A result from @ensuring@ met a generator that is not a constructor it can give a result.
+      ResultNeedsConstructor
     deriving (Eq, Show)
 
 {- | Return the value, or fail with the 'explain' text of the error.
@@ -372,6 +376,22 @@ explain (IntegerLeafRead reader) =
                , "Fix: state the relation as the contract of the constructor whose"
                , "children it relates, or use elements for a small set of integers."
                ]
+explain (InexactResult (Symbol symbol)) =
+    guidance
+        [ "The result of the constructor " <> show symbol <> " names a child whose"
+        , "refinement does not fix one integer, so the result has no one value."
+        , "Fix: draw that child from elements, every, or a constructor with a"
+        , "result, or leave it out of the result."
+        ]
+explain ResultNeedsConstructor =
+    guidance
+        [ "ensuring gives a result to the constructor that node, guarded, or"
+        , "refinedNode closes. This generator is not such a constructor: it is a"
+        , "pool, a choice, a product, or a constructor from refinedNodeByRoots,"
+        , "which computes its own refinement."
+        , "Fix: write ensuring directly after node or guarded, as in"
+        , "guarded \"black\" (\\l r -> l .== r) `ensuring` (\\l _ -> l + 1)."
+        ]
 
 -- | Report a failure of the shared ranked engine as a generator failure.
 fromRankedError :: Ranked.RankedError -> GenError

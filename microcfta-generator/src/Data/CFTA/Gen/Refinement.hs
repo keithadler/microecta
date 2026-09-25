@@ -35,6 +35,7 @@ module Data.CFTA.Gen.Refinement (
     satisfying,
     node,
     guarded,
+    ensuring,
     recurUpTo,
     refinedNode,
     refinedNodeByRoots,
@@ -88,6 +89,7 @@ import Data.CFTA.Refinement (
     Verdict (Yes),
     boundDepth,
     combineConstraints,
+    contractTermName,
     eraseRefinements,
     minimize,
     nodeEdges,
@@ -103,6 +105,7 @@ import Data.CFTA.Refinement.Expression (
     Refinement,
     literal,
     refinementFormula,
+    substitute,
     true,
     (.&&),
     (.<=),
@@ -111,12 +114,15 @@ import Data.CFTA.Refinement.Expression (
 import Data.CFTA.Refinement.Guard (
     ContractBuilder (contractArity),
     GuardBuilder,
+    ResultBuilder (resultArity),
     buildGuard,
     contract,
     guardArgumentCount,
     requires,
+    resultTerm,
     root,
  )
+import Data.CFTA.Refinement.Lattice (onlyPoint)
 import Data.CFTA.Refinement.LiquidFixpoint (withZ3Assuming)
 
 -- | A generator over liquid tree automata.
@@ -316,6 +322,46 @@ guarded symbol builder child
   where
     arity = spineArity child
 
+{- | Give a constructor a result: a term of its children, one term for each
+child, in order.
+
+Write it between the constructor and its children:
+
+@guarded "black" (\\l r -> l .== r) `ensuring` (\\l _ -> l + 1) $ LTAGen.do ...@
+
+The refinement of each constructed term is @\\v -> v .== result@, for the
+values of its children, so a parent's contract or condition reads the result.
+Each child that the result names must have a refinement that fixes one
+integer, as 'elements' and another result give; otherwise 'compile' reports
+'InexactResult'. The constructor must be one that 'node', 'guarded', or
+'refinedNode' closes, possibly mapped; another generator gives
+'ResultNeedsConstructor'.
+-}
+ensuring :: (ResultBuilder result) => (LTAGen a -> LTAGen a) -> result -> LTAGen a -> LTAGen a
+ensuring close result = withResult . close
+  where
+    withResult :: LTAGen b -> LTAGen b
+    withResult closed = case genRecipe closed of
+        Closed (LiquidSymbol symbol _) constraint inner
+            | resultArity result /= spineArity inner ->
+                Transparent $ Left $ InvalidSupport $ GuardArityMismatch symbol (spineArity inner) (resultArity result)
+            | otherwise ->
+                withRecipe (ClosedBy (resultLabel symbol) constraint inner) $ Transparent $ Left SourceRequiresCompilation
+        Mapped transform inner -> transform <$> withResult inner
+        _ -> case closed of
+            Transparent (Left err) | err /= SourceRequiresCompilation -> closed
+            _ -> Transparent $ Left ResultNeedsConstructor
+      where
+        resultLabel symbol roots =
+            maybe (Left $ InexactResult symbol) (\value -> Right $ LiquidSymbol symbol $ refinementFormula (.== literal value))
+                $ onlyPoint "v"
+                $ substitute
+                    [ (contractTermName index, literal value)
+                    | (index, LiquidSymbol _ refinement) <- zip [0 ..] roots
+                    , Just value <- [onlyPoint "v" refinement]
+                    ]
+                    (refinementFormula (.== resultTerm result))
+
 {- | A recursive description, unfolded a bounded number of times.
 
 The step receives the generator of the previous unfolding and returns the
@@ -370,7 +416,7 @@ refinedNodeByRoots symbol refinementOf guardBuilder child =
         symbol
         guardBuilder
         child
-        (ClosedBy $ \roots -> LiquidSymbol symbol $ refinementFormula $ refinementOf roots)
+        (ClosedBy $ \roots -> Right $ LiquidSymbol symbol $ refinementFormula $ refinementOf roots)
         (const Nothing)
 
 {- | Close a child description with a guarded constructor.
