@@ -34,6 +34,10 @@ module Data.CFTA.Ranked.Internal.Size (
     sizeIndex,
     countAtSize,
     sizeClassOf,
+    sizeMajorRank,
+    planPosition,
+    productPosition,
+    choicePosition,
     constantIndex,
     mapIndex,
     productIndex,
@@ -43,7 +47,7 @@ module Data.CFTA.Ranked.Internal.Size (
     sizeClasses,
 ) where
 
-import Data.CFTA.Ranked.Internal.Decoder (Plan (..))
+import Data.CFTA.Ranked.Internal.Decoder (Plan (..), planCardinality)
 
 {- | The size classes of one language: how many members each holds, and how
 to select one by its position in the class.
@@ -140,6 +144,67 @@ sizeClassOf index rank
     go size position (count : rest)
         | position < count = Just (size, position)
         | otherwise = go (size + 1) (position - count) rest
+
+-- | The size-major rank of one position in one size class: the members of the smaller sizes come first.
+sizeMajorRank :: SizeIndex a -> Int -> Integer -> Integer
+sizeMajorRank index size position = sum (take (size - 1) $ sizeClassCounts index) + position
+
+{- | The size class and the position in it of one rank of a finite plan.
+
+This is the inverse of 'sizeClassSelect' on 'sizeIndex': the rank that
+'sizeClassSelect' returns for the size and position is the given rank.
+'Nothing' means that the rank is outside the plan.
+-}
+planPosition :: Plan a -> Integer -> Maybe (Int, Integer)
+planPosition plan rank
+    | rank < 0 || rank >= planCardinality plan = Nothing
+    | otherwise = case plan of
+        PlanSelect _ _ -> Just (1, rank)
+        PlanSelectOnDemand _ _ -> Just (1, rank)
+        PlanShared _ _ inner -> planPosition inner rank
+        PlanMap _ inner -> planPosition inner rank
+        PlanChoice branches -> branchPosition [] branches rank
+        PlanAp radix planF planX -> do
+            let (rankF, rankX) = rank `quotRem` radix
+            positionF <- planPosition planF rankF
+            positionX <- planPosition planX rankX
+            pure $ productPosition (sizeIndex planF) (sizeIndex planX) positionF positionX
+        PlanSized classes -> classPosition classes rank
+  where
+    branchPosition _ [] _ = Nothing
+    branchPosition earlier ((count, branch) : rest) remaining
+        | remaining < count = do
+            (size, position) <- planPosition branch remaining
+            pure (size, choicePosition (map sizeIndex $ reverse earlier) (length earlier) size position)
+        | otherwise = branchPosition (branch : earlier) rest (remaining - count)
+    classPosition [] _ = Nothing
+    classPosition ((size, count, _, _) : rest) remaining
+        | remaining < count = Just (size, remaining)
+        | otherwise = classPosition rest (remaining - count)
+
+{- | The size and the position in its size class of a product member, from
+the size and position of its function and of its argument.
+
+Within a size class, splits come in ascending function size, and each split
+is ordered function-major, as 'productSplit' reads them.
+-}
+productPosition :: SizeIndex (a -> b) -> SizeIndex a -> (Int, Integer) -> (Int, Integer) -> (Int, Integer)
+productPosition indexF indexX (sizeF, positionF) (sizeX, positionX) =
+    ( size
+    , sum [countAtSize indexF functionSize * countAtSize indexX (size - functionSize) | functionSize <- [1 .. sizeF - 1]]
+        + positionF * countAtSize indexX sizeX
+        + positionX
+    )
+  where
+    size = sizeF + sizeX
+
+{- | The position in one size class of a member of one alternative, from its
+position in that alternative's class. The alternatives before it come first,
+as 'partAt' reads them.
+-}
+choicePosition :: [SizeIndex a] -> Int -> Int -> Integer -> Integer
+choicePosition branches branch size position =
+    sum [countAtSize earlier size | earlier <- take branch branches] + position
 
 {- | The non-empty size classes up to a bound, as size, count, and a decoder
 for one position in that class.
