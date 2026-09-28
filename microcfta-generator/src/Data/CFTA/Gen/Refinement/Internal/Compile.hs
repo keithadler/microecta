@@ -44,7 +44,7 @@ import Data.CFTA.Equality.Constraint (EqConstraints (EmptyConstraints))
 import Data.CFTA.Gen
 import Data.CFTA.Gen.Internal.Bucket (KeyedBucket (..), mergeComponentsByKey)
 import qualified Data.CFTA.Gen.Internal.Flat as Flat
-import Data.CFTA.Gen.Internal.Static (holeStatic, mapStatic, pointsStatic)
+import Data.CFTA.Gen.Internal.Static (Static, holeStatic, mapStatic, pointsStatic)
 import Data.CFTA.Gen.Internal.Types (Gen (..), Grouped (..), Language (..), Recipe (..))
 import Data.CFTA.Gen.Refinement.Internal.Witness
 import Data.CFTA.Refinement
@@ -59,7 +59,15 @@ import Data.CFTA.Refinement.Expression (
     (.&&),
     (.==),
  )
-import Data.CFTA.Refinement.Lattice (LatticeError (UnboundedVariable), Points, onlyPoint, pointAt, pointCount, points)
+import Data.CFTA.Refinement.Lattice (
+    LatticeError (UnboundedVariable),
+    Points,
+    onlyPoint,
+    pointAt,
+    pointCount,
+    pointRank,
+    points,
+ )
 
 -- | A generator over liquid tree automata.
 type LTAGen = Gen LiquidSymbol LiquidConstraint
@@ -702,7 +710,7 @@ compileOpenNode compiler requested labelling constraint child = do
                 else
                     if symbolic label
                         then Just (OpenKey observations total formula (Just $ pointCount found), kept, Nothing)
-                        else Just (closedKey observations, kept, Just (pointCount found, pointAt found))
+                        else Just (closedKey observations, kept, Just found)
 
 {- | Settle each tuple of child groups: drop it, leave its variables open under
 a new key, or close them by the integer points of its formula. The mass of a
@@ -711,7 +719,7 @@ keeps the accepted tuples of pools. New keys are positioned by first
 appearance.
 -}
 settleGroups ::
-    ([OpenKey] -> Either GenError (Maybe (OpenKey, Rational, Maybe (Integer, Integer -> [Integer])))) ->
+    ([OpenKey] -> Either GenError (Maybe (OpenKey, Rational, Maybe Points))) ->
     LTAGrouped [OpenKey] ([Integer] -> a) ->
     Either GenError (LTAGrouped OpenKey ([Integer] -> a))
 settleGroups _ (CyclicGrouped _) = Right $ Grouped $ Left UnboundedGenerator
@@ -725,8 +733,7 @@ settleGroups settle (Grouped (Right buckets)) = do
   where
     one (childKeys, KeyedBucket mass static) = fmap (build mass static) <$> settle childKeys
     build mass static (key, kept, Nothing) = (key, mass * kept, static)
-    build mass static (key, kept, Just (count, decode)) =
-        (key, mass * kept, mapStatic const $ pointsStatic fillHoles (Indexed count decode) static)
+    build mass static (key, kept, Just found) = (key, mass * kept, mapStatic const $ closePoints found static)
 
 {- | Close every open group by the integer points of its formula, for a parent
 that reads no variable.
@@ -745,7 +752,15 @@ closeOpen (Grouped (Right buckets)) = do
             pure $
                 if pointCount found == 0
                     then Nothing
-                    else Just (openObservations key, mass, pointsStatic fillHoles (Indexed (pointCount found) (pointAt found)) static)
+                    else Just (openObservations key, mass, closePoints found static)
+
+{- | Apply the outcomes of an open group to the integer points of its formula.
+A term ranks by the integers at its placeholder leaves.
+-}
+closePoints :: Points -> Static LiquidSymbol LiquidConstraint ([Integer] -> a) -> Static LiquidSymbol LiquidConstraint a
+closePoints found = pointsStatic fillHoles (pointRank found <=< traverse leafValue) (Indexed (pointCount found) (pointAt found))
+  where
+    leafValue (LiquidSymbol _ refinement) = onlyPoint valueName refinement
 
 {- | Replace the placeholder leaves of a term, in order, by the leaves of the
 integers of a point, and make each label that names open variables exact.
