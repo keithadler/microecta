@@ -66,7 +66,7 @@ newCountCache :: Counts symbol -> IORef (Counts symbol)
 newCountCache counts = unsafePerformIO $ newIORef counts
 {-# NOINLINE newCountCache #-}
 
--- | Run a selection from the shared counts, and keep the counts it adds.
+-- | Run a selection or a ranking from the shared counts, and keep the counts it adds.
 selectCached :: IORef (Counts symbol) -> State.State (Counts symbol) a -> a
 selectCached cache selection = unsafePerformIO $ do
     counts <- readIORef cache
@@ -97,10 +97,16 @@ Ranks follow the order of the constructors at each position, and the
 constructors are ordered by arity, then by the given key. Pass a key with a
 stable order, such as the text of an interned symbol, so that ranks do not
 depend on interning order.
+
+The second result is the inverse of the ranks. It gives the rank of a term,
+or 'Nothing' when the language does not contain the term. The two results
+share one count cache.
 -}
 symbolicRanked ::
     (Theory symbol constraint, Ord key) =>
-    (symbol -> key) -> ECTA.Node symbol constraint -> Either Ranked.RankedError (Ranked.Ranked (Tree.Tree symbol))
+    (symbol -> key) ->
+    ECTA.Node symbol constraint ->
+    Either Ranked.RankedError (Ranked.Ranked (Tree.Tree symbol), Tree.Tree symbol -> Maybe Integer)
 symbolicRanked order = symbolicRankedWith order interpret
   where
     interpret constraint = case indicators constraint of
@@ -123,13 +129,15 @@ symbolicRankedWith ::
     (symbol -> key) ->
     Interpretation constraint ->
     Node symbol constraint ->
-    Either Ranked.RankedError (Ranked.Ranked (Tree.Tree symbol))
-symbolicRankedWith order interpret root =
-    Ranked.fromIndexedOnDemand $ Ranked.Indexed total select
+    Either Ranked.RankedError (Ranked.Ranked (Tree.Tree symbol), Tree.Tree symbol -> Maybe Integer)
+symbolicRankedWith order interpret root = do
+    ranked <- Ranked.fromIndexedOnDemand $ Ranked.Indexed total select
+    pure (ranked, rankOf)
   where
     (total, counts) = State.runState (countNode interpret root) emptyCounts
     cache = newCountCache counts
     select rank = selectCached cache $ selectTerm order interpret root [] rank
+    rankOf term = selectCached cache $ fmap snd <$> rankAt order interpret root [] term 0
 
 -- | Count a shared graph once per interned identity.
 countNode ::
@@ -426,6 +434,46 @@ selectAt order interpret root position rank = do
         ~(term, restricted, suffixRank) <- selectAt order interpret graph (position <> [index]) remaining
         ~(children, final, finalRank) <- selectChildren restricted suffixRank rest
         pure (term : children, final, finalRank)
+
+{- | Add the count of the terms that 'selectAt' puts before a subterm, and
+restrict the graph as 'selectAt' does.
+
+The result is the restricted graph and the new count. It is 'Nothing' when no
+term of the graph has the subterm at the position.
+-}
+rankAt ::
+    (Theory symbol constraint, Ord key) =>
+    (symbol -> key) ->
+    Interpretation constraint ->
+    Node symbol constraint ->
+    [Int] ->
+    Tree.Tree symbol ->
+    Integer ->
+    State.State (Counts symbol) (Maybe (Node symbol constraint, Integer))
+rankAt order interpret root position term@(Tree.Node symbol children) before = do
+    let local = project position root
+    count <- countNode interpret local
+    if count == 1
+        then do
+            counts <- State.get
+            let unique = State.evalState (selectUniqueAt order interpret local []) counts
+            pure $ if unique == term then Just (root, before) else Nothing
+        else case break (== (symbol, length children)) $ constructorsAt order position root of
+            (_, []) -> pure Nothing
+            (earlier, constructor : _) -> do
+                skipped <- traverse (\other -> countNode interpret $ condition position other root) earlier
+                let restricted = condition position constructor root
+                restrictedCount <- countNode interpret restricted
+                if restrictedCount == 0
+                    then pure Nothing
+                    else rankChildren restricted (before + sum skipped) $ zip [0 ..] children
+  where
+    rankChildren graph rank [] = pure $ Just (graph, rank)
+    rankChildren graph rank ((index, child) : rest) = do
+        result <- rankAt order interpret graph (position <> [index]) child rank
+        case result of
+            Nothing -> pure Nothing
+            Just (restricted, suffixRank) -> rankChildren restricted suffixRank rest
 
 -- | Decode a singleton language without traversing unobserved sibling trees.
 selectUniqueAt ::

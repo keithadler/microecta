@@ -4,6 +4,8 @@
 module Data.CFTA.Gen.Equality.TestSupport (
     aggregateRights,
     decodesEveryRankExactly,
+    ranksBack,
+    ranksEveryTermBack,
     renameSymbols,
 ) where
 
@@ -14,9 +16,12 @@ import Data.Typeable (Typeable)
 import Test.Hspec (Expectation, expectationFailure, shouldBe)
 
 import qualified Data.CFTA as FTA
+import Data.CFTA.Constraint (Constraint)
 import Data.CFTA.Equality (Node)
 import Data.CFTA.Equality.Constraint (EqConstraints)
 import qualified Data.CFTA.Gen.Equality as ECTAGen
+import Data.CFTA.Gen.Internal.Automaton (finiteAutomatonRank)
+import qualified Data.CFTA.Gen.Internal.Flat as Flat
 import qualified Data.CFTA.Interned as Interned
 import Data.CFTA.Ranked.Internal.Sampler (Exact (..))
 
@@ -56,3 +61,20 @@ decodesEveryRankExactly generator =
                 `shouldBe` [ (1 % total, fmap (rank,) (ECTAGen.unrank generator rank))
                            | rank <- [0 .. total - 1]
                            ]
+
+-- | Require that the term at each rank of a finite import ranks back to that rank.
+ranksBack ::
+    (Constraint constraint, Ord symbol, Hashable symbol, Typeable symbol, Ord key) =>
+    (symbol -> key) -> Node symbol constraint -> [Integer] -> Expectation
+ranksBack order root ranks =
+    (traverse (ECTAGen.unrank $ Flat.fromAutomaton order root) ranks >>= traverse (finiteAutomatonRank order root))
+        `shouldBe` Right ranks
+
+-- | Require that the term at every rank of a finite import ranks back to that rank.
+ranksEveryTermBack ::
+    (Constraint constraint, Ord symbol, Hashable symbol, Typeable symbol, Ord key) =>
+    (symbol -> key) -> Node symbol constraint -> Expectation
+ranksEveryTermBack order root =
+    case ECTAGen.cardinality $ Flat.fromAutomaton order root of
+        Left err -> expectationFailure $ show err
+        Right total -> ranksBack order root [0 .. total - 1]
