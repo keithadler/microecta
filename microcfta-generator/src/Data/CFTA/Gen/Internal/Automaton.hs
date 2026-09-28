@@ -167,7 +167,10 @@ alternatives that share a symbol use symbolic equality contexts and
 intersection counts. Both forms of plan order the constructors by arity,
 then by the given key, so ranks do not depend on interning order. Nullary
 constructors come first, so rank shrinking moves toward leaves. Only a
-selected term is constructed.
+selected term is constructed. The static ranks an accepted term by the same
+plans: a compact node adds the offset of the matching edge to the mixed-radix
+rank of its equality groups, and a symbolic node counts the accepted terms
+before the term.
 -}
 finiteAutomaton ::
     (Constraint constraint, Ord symbol, Hashable symbol, Typeable symbol, Ord key) =>
