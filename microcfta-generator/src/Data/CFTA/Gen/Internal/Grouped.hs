@@ -136,7 +136,7 @@ mapWithKey transform (CyclicGrouped result) =
                 (mapSampleIndex (transform key) $ recursiveSampling recursive)
                 (recursiveWeighted recursive)
                 (recursiveOccurrence recursive)
-                Nothing
+                (recursiveTerm recursive)
                 (recursiveInspection recursive)
             )
             (keyedRecursiveMasses group)
